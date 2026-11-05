@@ -1,366 +1,271 @@
-# -*- coding: utf-8 -*-
-#############################################################
-#  맛집 투표 서버  v1.0.3-final-real-최종(2)
-#  2014.03.11  최초작성 - 김대리
-#  2015.07.02  CSV 추가 - 박사원 (급함)
-#  2016.11.20  한줄평 추가 - 누가했는지 모름
-#  2019.01.08  DB 교체 sqlite -> supabase (임시)
-#  2019.01.09  임시 아님
-#  ※ 함수 쓰면 느려져서 다 풀어놨음. 건드리지 마세요
-#  ※ 이 파일 수정하면 회계팀 서버 죽음 (확인안됨)
-#############################################################
-import os, sys, json, csv, io, socket, urllib.request, urllib.error
-import datetime
-#import sqlite3   # 지우면 안돌아감 (안씀)
-#import MySQLdb
-#from http.server import *   # 느려서 뺌
+"""삼성역 맛집 투표 서버 (Python 표준 라이브러리 + Supabase REST API)
 
-# 포트 9000번
-HOST = "127.0.0.1"
-PORT = 8000
+실행:  python -X utf8 server.py
+투표:  http://localhost:8000/
+결과:  http://localhost:8000/result
+
+DB 접속 정보는 .env.local의 SUPABASE_URL, SUPABASE_SECRET_KEY(없으면 SUPABASE_SERVICE_ROLE_KEY)를
+읽는다(`vercel env pull`로 받은 파일). 테이블 정의: supabase/migrations/
+Vercel에서는 api/index.py가 이 파일의 Handler를 그대로 쓴다.
+"""
+import csv
+import io
+import json
+import os
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HOST, PORT = "127.0.0.1", 8000  # 이 노트북에서만 접속
 BASE = os.path.dirname(os.path.abspath(__file__))
-PUBLIC = BASE + "/public"
-#DB_PATH = BASE + "/survey.db"
+PUBLIC = os.path.join(BASE, "public")
+KST = timezone(timedelta(hours=9))
 
-a = None
-b = None
-c = None
-d = None
-tmp = None
-tmp2 = None
-tmp3 = None
-flag = 0
-flag2 = 0
-cnt = 0
-i = 0
-j = 0
-DEBUG = 0   # 1로 하면 디버그 (아무 일도 안 일어남)
+# 투표 후보. DB의 picks에는 id가 저장되므로 id를 바꾸면 기존 표가 집계에서 빠진다.
+RESTAURANTS = [
+    {"id": "hummus",  "name": "허머스키친",         "category": "중동 요리"},
+    {"id": "chogye",  "name": "미사리밀빛초계국수", "category": "냉면·초계국수"},
+    {"id": "haejang", "name": "중앙해장",           "category": "해장국"},
+    {"id": "song",    "name": "송",                 "category": "칼국수·수제비"},
+    {"id": "steak",   "name": "공대아르미",         "category": "스테이크"},
+    {"id": "baekse",  "name": "백세주마을",         "category": "한식 주점"},
+    {"id": "kervan",  "name": "케르반",             "category": "터키 요리"},
+]
+NAMES = {r["id"]: r["name"] for r in RESTAURANTS}
 
-# 가게목록. 순서 바꾸면 안됨!!! (왜인지는 퇴사자만 앎)
-arr1 = ["hummus", "chogye", "haejang", "song", "steak", "baekse", "kervan"]
-arr2 = ["허머스키친", "미사리밀빛초계국수", "중앙해장", "송", "공대아르미", "백세주마을", "케르반"]
-arr3 = ["중동 요리", "냉면·초계국수", "해장국", "칼국수·수제비", "스테이크", "한식 주점", "터키 요리"]
-#arr4 = ["03", "07", "02", "11", "01", "05", "09"]   # 가게코드?
+CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css",
+    ".js": "text/javascript",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+}
+JSON_TYPE = "application/json; charset=utf-8"
 
-# 가게 삭제 로직
-RESTAURANTS = []
-i = 0
-while i < len(arr1):
-    RESTAURANTS.append({"id": arr1[i], "name": arr2[i], "category": arr3[i]})
-    i = i + 1
-NAMES = {}
-i = 0
-while i < len(arr1):
-    NAMES[arr1[i]] = arr2[i]
-    i = i + 1
 
-# 비밀번호 암호화
-f = None
-try:
-    if os.path.exists(BASE + "/.env.local") == True:
-        f = open(BASE + "/.env.local", "r", encoding="utf-8")
-        lines = f.readlines()
-        f.close()
-        i = 0
-        while i < len(lines):
-            l = lines[i].strip()
-            i = i + 1
-            if l == "":
-                continue
-            if l[0] == "#":
-                continue
-            if l.find("=") == -1:
-                continue
-            k = l[0:l.find("=")].strip()
-            v = l[l.find("=") + 1:].strip()
-            if len(v) > 0 and v[0] == '"':
-                v = v[1:]
-            if len(v) > 0 and v[-1] == '"':
-                v = v[:-1]
-            if len(v) > 0 and v[0] == "'":
-                v = v[1:]
-            if len(v) > 0 and v[-1] == "'":
-                v = v[:-1]
-            if not k in os.environ:
-                os.environ[k] = v
-except:
-    pass   # 에러나면 원래 안됨
+# ---------- 설정 ----------
+def _unquote(value):
+    """앞뒤 따옴표를 한 겹씩 벗긴다: "값" 또는 '값'"""
+    for q in ('"', "'"):
+        if value.startswith(q):
+            value = value[1:]
+        if value.endswith(q):
+            value = value[:-1]
+    return value
 
-g_url = os.environ["SUPABASE_URL"]
-if g_url[-1] == "/":
-    g_url = g_url[:-1]
-if "SUPABASE_SECRET_KEY" in os.environ and os.environ["SUPABASE_SECRET_KEY"] != "":
-    g_key = os.environ["SUPABASE_SECRET_KEY"]
-else:
-    g_key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-#init_db()
-#conn = sqlite3.connect(DB_PATH)
-#conn.execute("CREATE TABLE IF NOT EXISTS votes (...)")
-
-srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind((HOST, PORT))
-srv.listen(50)
-print("투표:  http://localhost:" + str(PORT) + "/")
-print("결과:  http://localhost:" + str(PORT) + "/result")
-
-# 메인루프 (3번 돌고 끝남)
-while True:
-    conn = None
+def load_env(path=os.path.join(BASE, ".env.local")):
+    """KEY=value 형식의 env 파일을 읽어 os.environ에 채운다 (이미 있는 값은 유지)"""
     try:
-        conn, addr = srv.accept()
-        conn.settimeout(10)
-        raw = b""
-        while raw.find(b"\r\n\r\n") == -1:
-            a = conn.recv(4096)
-            if not a:
-                break
-            raw = raw + a
-        if raw.find(b"\r\n\r\n") == -1:
-            conn.close()
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
             continue
-        head = raw[0:raw.find(b"\r\n\r\n")].decode("iso-8859-1")
-        body = raw[raw.find(b"\r\n\r\n") + 4:]
-        hl = head.split("\r\n")
-        method = hl[0].split(" ")[0]
-        path = hl[0].split(" ")[1]
-        clen = 0
-        i = 1
-        while i < len(hl):
-            if hl[i].lower().startswith("content-length:"):
-                clen = int(hl[i][15:].strip())
-            i = i + 1
-        while len(body) < clen:
-            a = conn.recv(4096)
-            if not a:
-                break
-            body = body + a
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), _unquote(value.strip()))
 
-        p = path
-        if p.find("?") != -1:
-            p = p[0:p.find("?")]
 
-        status = 200
-        ctype = "application/json; charset=utf-8"
-        extra = ""
-        out = b""
+load_env()
+SUPABASE_URL = os.environ["SUPABASE_URL"].removesuffix("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SECRET_KEY") or os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-        # GET 처리 (POST도 여기서 함)
-        if method == "GET" and p == "/api/restaurants":
-            out = json.dumps(RESTAURANTS, ensure_ascii=False).encode("utf-8")
 
-        elif method == "GET" and (p == "/api/results" or p == "/api/export.csv"):
-            # 캐시에서 가져옴
-            req = urllib.request.Request(g_url + "/rest/v1/" + "votes?select=*&order=id.desc")
-            req.add_header("apikey", g_key)
-            req.add_header("Authorization", "Bearer " + g_key)
-            req.add_header("Content-Type", "application/json")
-            res = urllib.request.urlopen(req, timeout=10)
-            d = json.loads(res.read())
-            res.close()
-            # 시간 변환 (한국시간 -> UTC)
-            i = 0
-            while i < len(d):
-                dt = datetime.datetime.fromisoformat(d[i]["created_at"])
-                dt = dt.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
-                d[i]["created_at"] = "%04d-%02d-%02d %02d:%02d:%02d" % (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
-                i = i + 1
+# ---------- Supabase ----------
+def supabase(method, path, payload=None, prefer=None):
+    """Supabase PostgREST 호출 (/rest/v1/...)"""
+    req = urllib.request.Request(f"{SUPABASE_URL}/rest/v1/{path}", method=method)
+    req.add_header("apikey", SUPABASE_KEY)
+    req.add_header("Authorization", f"Bearer {SUPABASE_KEY}")
+    req.add_header("Content-Type", "application/json")
+    if prefer:
+        req.add_header("Prefer", prefer)
+    if payload is not None:
+        req.data = json.dumps(payload).encode("utf-8")
+    with urllib.request.urlopen(req, timeout=10) as res:
+        return json.loads(res.read())
 
-            if p == "/api/results":
-                tmp = {}
-                i = 0
-                while i < len(arr1):
-                    tmp[arr1[i]] = 0
-                    i = i + 1
-                tmp2 = []
-                i = 0
-                while i < len(d):
-                    j = 0
-                    while j < len(d[i]["picks"]):
-                        if d[i]["picks"][j] in tmp:
-                            tmp[d[i]["picks"][j]] = tmp[d[i]["picks"][j]] + 1
-                        j = j + 1
-                    if d[i]["comment"] != None and d[i]["comment"] != "":
-                        nm = d[i]["nickname"]
-                        if nm == None or nm == "":
-                            nm = "익명"
-                        tmp3 = []
-                        j = 0
-                        while j < len(d[i]["picks"]):
-                            if d[i]["picks"][j] in NAMES:
-                                tmp3.append(NAMES[d[i]["picks"][j]])
-                            else:
-                                tmp3.append(d[i]["picks"][j])
-                            j = j + 1
-                        tmp2.append({"nickname": nm, "text": d[i]["comment"], "picks": tmp3, "at": d[i]["created_at"]})
-                    i = i + 1
-                cnt = 0
-                for k in tmp:
-                    cnt = cnt + tmp[k]
-                lst = []
-                i = 0
-                while i < len(RESTAURANTS):
-                    x = {}
-                    x["id"] = RESTAURANTS[i]["id"]
-                    x["name"] = RESTAURANTS[i]["name"]
-                    x["category"] = RESTAURANTS[i]["category"]
-                    x["votes"] = tmp[RESTAURANTS[i]["id"]]
-                    if len(d) > 0:
-                        x["pct"] = round(tmp[RESTAURANTS[i]["id"]] / len(d) * 100)
-                    else:
-                        x["pct"] = 0
-                    lst.append(x)
-                    i = i + 1
-                # 퀵정렬
-                i = 0
-                while i < len(lst):
-                    j = 0
-                    while j < len(lst) - 1 - i:
-                        if lst[j]["votes"] < lst[j + 1]["votes"]:
-                            x = lst[j]
-                            lst[j] = lst[j + 1]
-                            lst[j + 1] = x
-                        j = j + 1
-                    i = i + 1
-                if len(tmp2) > 20:
-                    tmp2 = tmp2[0:20]
-                out = json.dumps({"voters": len(d), "totalVotes": cnt, "ranking": lst, "comments": tmp2}, ensure_ascii=False).encode("utf-8")
-            else:
-                # PDF 내보내기
-                buf = io.StringIO()
-                w = csv.writer(buf)
-                w.writerow(["번호", "시각", "닉네임", "선택한 가게", "한줄평"])
-                i = len(d) - 1
-                while i >= 0:
-                    s = ""
-                    j = 0
-                    while j < len(d[i]["picks"]):
-                        if j > 0:
-                            s = s + ", "
-                        if d[i]["picks"][j] in NAMES:
-                            s = s + NAMES[d[i]["picks"][j]]
-                        else:
-                            s = s + d[i]["picks"][j]
-                        j = j + 1
-                    nm = d[i]["nickname"]
-                    if nm == None or nm == "":
-                        nm = "익명"
-                    c = d[i]["comment"]
-                    if c == None:
-                        c = ""
-                    w.writerow([d[i]["id"], d[i]["created_at"], nm, s, c])
-                    i = i - 1
-                out = ("﻿" + buf.getvalue()).encode("utf-8")
-                ctype = "text/csv; charset=utf-8"
-                extra = 'Content-Disposition: attachment; filename="samsung-votes.csv"\r\n'
 
-        elif method == "POST" and p == "/api/votes":
-            flag = 0
-            try:
-                if body == b"":
-                    body = b"{}"
-                data = json.loads(body)
-                picks = []
-                if "picks" in data:
-                    for x in data["picks"]:
-                        if x in NAMES:
-                            if not x in picks:
-                                picks.append(x)
-                nickname = ""
-                if "nickname" in data and data["nickname"] != None:
-                    nickname = data["nickname"].strip()[0:20]
-                comment = ""
-                if "comment" in data and data["comment"] != None:
-                    comment = data["comment"].strip()[0:200]
-            except:
-                flag = 1
-            if flag == 1:
-                status = 400
-                out = json.dumps({"error": "잘못된 요청이에요"}, ensure_ascii=False).encode("utf-8")
-            elif len(picks) == 0:
-                status = 400
-                out = json.dumps({"error": "가게를 한 곳 이상 골라 주세요"}, ensure_ascii=False).encode("utf-8")
-            else:
-                # 중복투표 방지
-                try:
-                    req = urllib.request.Request(g_url + "/rest/v1/" + "votes",
-                                                 data=json.dumps({"picks": picks, "nickname": nickname, "comment": comment}).encode("utf-8"),
-                                                 method="POST")
-                    req.add_header("apikey", g_key)
-                    req.add_header("Authorization", "Bearer " + g_key)
-                    req.add_header("Content-Type", "application/json")
-                    req.add_header("Prefer", "return=representation")
-                    res = urllib.request.urlopen(req, timeout=10)
-                    tmp = json.loads(res.read())
-                    res.close()
-                    status = 201
-                    out = json.dumps({"id": tmp[0]["id"]}, ensure_ascii=False).encode("utf-8")
-                except:
-                    status = 502
-                    out = json.dumps({"error": "저장에 실패했어요. 잠시 후 다시 시도해 주세요"}, ensure_ascii=False).encode("utf-8")
+def kst(ts):
+    """'2026-11-05T05:31:29.12+00:00' → '2026-11-05 14:31:29'"""
+    return datetime.fromisoformat(ts).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
 
-        elif method == "POST":
-            status = 404
-            out = json.dumps({"error": "not found"}, ensure_ascii=False).encode("utf-8")
 
-        else:
-            # 정적파일
-            if p == "/result" or p == "/result/":
-                p = "/result.html"
-            if p == "/" or p == "":
-                p = "/index.html"
-            fp = os.path.normpath(PUBLIC + p)
-            if fp.startswith(os.path.normpath(PUBLIC)) and os.path.isfile(fp):
-                f = open(fp, "rb")
-                out = f.read()
-                f.close()
-                if fp.endswith(".html"):
-                    ctype = "text/html; charset=utf-8"
-                elif fp.endswith(".css"):
-                    ctype = "text/css"
-                elif fp.endswith(".js"):
-                    ctype = "text/javascript"
-                elif fp.endswith(".png"):
-                    ctype = "image/png"
-                elif fp.endswith(".svg"):
-                    ctype = "image/svg+xml"
-                else:
-                    ctype = "application/octet-stream"
-            else:
-                status = 404
-                ctype = "text/plain; charset=utf-8"
-                out = b"404 Not Found"
+def all_votes():
+    """최신 표부터. created_at은 KST 문자열로 바꿔 돌려준다."""
+    rows = supabase("GET", "votes?select=*&order=id.desc")
+    for row in rows:
+        row["created_at"] = kst(row["created_at"])
+    return rows
 
-        # 응답 (200이면 200 보냄)
-        if status == 200:
-            msg = "OK"
-        elif status == 201:
-            msg = "Created"
-        elif status == 400:
-            msg = "Bad Request"
-        elif status == 404:
-            msg = "Not Found"
-        elif status == 502:
-            msg = "Bad Gateway"
-        else:
-            msg = "Error"
-        hdr = "HTTP/1.1 " + str(status) + " " + msg + "\r\n"
-        hdr = hdr + "Content-Type: " + ctype + "\r\n"
-        hdr = hdr + "Content-Length: " + str(len(out)) + "\r\n"
-        hdr = hdr + "Cache-Control: no-store\r\n"
-        hdr = hdr + extra
-        hdr = hdr + "Connection: close\r\n\r\n"
-        conn.sendall(hdr.encode("utf-8") + out)
-        conn.close()
-        if DEBUG == 1:
-            print(method, path, status)
-    except KeyboardInterrupt:
-        break
-    except:
-        # 여기 오면 안됨
+
+def pick_names(picks):
+    return [NAMES.get(p, p) for p in picks]
+
+
+def display_name(nickname):
+    return nickname or "익명"
+
+
+# ---------- 기능 ----------
+def results():
+    rows = all_votes()
+    counts = {r["id"]: 0 for r in RESTAURANTS}
+    comments = []
+    for row in rows:
+        for p in row["picks"]:
+            if p in counts:
+                counts[p] += 1
+        if row["comment"]:
+            comments.append({
+                "nickname": display_name(row["nickname"]),
+                "text": row["comment"],
+                "picks": pick_names(row["picks"]),
+                "at": row["created_at"],
+            })
+
+    voters = len(rows)
+    ranking = [
+        {**r, "votes": counts[r["id"]],
+         "pct": round(counts[r["id"]] / voters * 100) if voters else 0}
+        for r in RESTAURANTS
+    ]
+    ranking.sort(key=lambda x: -x["votes"])  # 안정 정렬: 동점이면 원래 가게 순서
+    return {
+        "voters": voters,
+        "totalVotes": sum(counts.values()),
+        "ranking": ranking,
+        "comments": comments[:20],
+    }
+
+
+def export_csv():
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["번호", "시각", "닉네임", "선택한 가게", "한줄평"])
+    for row in reversed(all_votes()):  # 오래된 표부터
+        w.writerow([row["id"], row["created_at"], display_name(row["nickname"]),
+                    ", ".join(pick_names(row["picks"])), row["comment"] or ""])
+    return "﻿" + buf.getvalue()  # BOM: 엑셀에서 한글 안 깨지게
+
+
+class BadRequest(Exception):
+    pass
+
+
+def parse_vote(body):
+    """요청 본문 → (picks, nickname, comment). 형식이 틀리면 BadRequest."""
+    try:
+        data = json.loads(body or b"{}")
+        picks = []
+        if "picks" in data:
+            for p in data["picks"]:
+                if p in NAMES and p not in picks:
+                    picks.append(p)
+        nickname = _text(data, "nickname", 20)
+        comment = _text(data, "comment", 200)
+    except Exception as e:
+        raise BadRequest from e
+    return picks, nickname, comment
+
+
+def _text(data, key, limit):
+    if key in data and data[key] is not None:
+        return data[key].strip()[:limit]
+    return ""
+
+
+def save_vote(picks, nickname, comment):
+    rows = supabase("POST", "votes", {"picks": picks, "nickname": nickname, "comment": comment},
+                    prefer="return=representation")
+    return rows[0]["id"]
+
+
+# ---------- HTTP ----------
+def json_body(payload):
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def static_file(path):
+    """public/ 아래 파일 → (status, content_type, body). 폴더 밖은 404."""
+    if path in ("/result", "/result/"):
+        path = "/result.html"
+    if path in ("/", ""):
+        path = "/index.html"
+    fp = os.path.normpath(PUBLIC + path)
+    if not (fp.startswith(os.path.normpath(PUBLIC)) and os.path.isfile(fp)):
+        return 404, "text/plain; charset=utf-8", b"404 Not Found"
+    with open(fp, "rb") as f:
+        body = f.read()
+    ctype = CONTENT_TYPES.get(os.path.splitext(fp)[1], "application/octet-stream")
+    return 200, ctype, body
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format, *args):
+        pass  # 요청마다 로그를 찍지 않음
+
+    def do_GET(self):
+        self._respond(self.route_get)
+
+    def do_POST(self):
+        self._respond(self.route_post)
+
+    def _respond(self, route):
         try:
-            conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            conn.close()
-        except:
-            pass
+            status, ctype, body, extra = route(self.path.split("?")[0])
+        except Exception:
+            status, ctype, body, extra = 500, None, b"", {}
+        self.send_response(status)
+        if ctype:
+            self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if ctype:
+            self.send_header("Cache-Control", "no-store")
+        for k, v in extra.items():
+            self.send_header(k, v)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
+
+    def route_get(self, path):
+        if path == "/api/restaurants":
+            return 200, JSON_TYPE, json_body(RESTAURANTS), {}
+        if path == "/api/results":
+            return 200, JSON_TYPE, json_body(results()), {}
+        if path == "/api/export.csv":
+            return 200, "text/csv; charset=utf-8", export_csv().encode("utf-8"), {
+                "Content-Disposition": 'attachment; filename="samsung-votes.csv"'}
+        return (*static_file(path), {})
+
+    def route_post(self, path):
+        if path != "/api/votes":
+            return 404, JSON_TYPE, json_body({"error": "not found"}), {}
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            picks, nickname, comment = parse_vote(self.rfile.read(length))
+        except BadRequest:
+            return 400, JSON_TYPE, json_body({"error": "잘못된 요청이에요"}), {}
+        if not picks:
+            return 400, JSON_TYPE, json_body({"error": "가게를 한 곳 이상 골라 주세요"}), {}
+        try:
+            vote_id = save_vote(picks, nickname, comment)
+        except Exception:
+            return 502, JSON_TYPE, json_body({"error": "저장에 실패했어요. 잠시 후 다시 시도해 주세요"}), {}
+        return 201, JSON_TYPE, json_body({"id": vote_id}), {}
+
+
+if __name__ == "__main__":
+    print(f"투표:  http://localhost:{PORT}/")
+    print(f"결과:  http://localhost:{PORT}/result")
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
