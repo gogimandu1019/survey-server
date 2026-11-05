@@ -1,0 +1,5 @@
+survey.db
+.env*
+__pycache__
+supabase
+.backup-clean
