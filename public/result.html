@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>맛집 투표 결과</title>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --text:#1f2937; --muted:#6b7280; --accent:#4f46e5; --track:#eef0f6; --gold:#f59e0b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:"Pretendard","Malgun Gothic",sans-serif; }
+  .wrap { max-width:860px; margin:40px auto; padding:0 16px; }
+  .head { display:flex; justify-content:space-between; align-items:flex-end; gap:12px; flex-wrap:wrap; margin-bottom:24px; }
+  h1 { margin:0 0 6px; font-size:28px; }
+  .sub { color:var(--muted); margin:0; }
+  .btn { padding:10px 16px; border-radius:10px; background:var(--accent); color:#fff; text-decoration:none; font-weight:700; font-size:14px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px; margin-bottom:16px; }
+  .kpi, .card { background:var(--card); border-radius:16px; padding:22px; box-shadow:0 4px 20px rgba(0,0,0,.06); }
+  .kpi .label { color:var(--muted); font-size:14px; }
+  .kpi .value { font-size:30px; font-weight:800; margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card { margin-bottom:16px; }
+  .card h2 { margin:0 0 16px; font-size:17px; }
+  .row { display:grid; grid-template-columns:34px 150px 1fr 80px; align-items:center; gap:10px; margin-bottom:12px; font-size:14px; }
+  .rank { font-weight:800; color:var(--muted); text-align:center; }
+  .row.top .rank { color:var(--gold); font-size:18px; }
+  .name b { display:block; }
+  .name small { color:var(--muted); }
+  .bar { height:16px; background:var(--track); border-radius:999px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:#a5b4fc; border-radius:999px; transition:width .4s; }
+  .row.top .bar i { background:var(--accent); }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .num small { color:var(--muted); }
+  @media (max-width:560px){ .row { grid-template-columns:28px 1fr 64px; } .row .bar { grid-column:2 / -1; grid-row:2; } }
+  .comments { list-style:none; padding:0; margin:0; }
+  .comments li { padding:12px 0; border-bottom:1px solid var(--track); font-size:14px; }
+  .comments li:last-child { border-bottom:0; }
+  .meta { display:block; color:var(--muted); font-size:12px; margin-top:4px; }
+  .note { margin-top:8px; font-size:13px; color:var(--muted); text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1>🍽️ 삼성역 맛집 투표 결과</h1>
+      <p class="sub">여러 곳 중복 선택 · 득표순</p>
+    </div>
+    <a class="btn" href="/api/export.csv">CSV 내려받기</a>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+  <div class="card"><h2>득표 순위</h2><div id="ranking"></div></div>
+  <div class="card"><h2>한줄평</h2><ul class="comments" id="comments"></ul></div>
+
+  <p class="note">서버 DB에서 5초마다 새로 읽어와요 · 마지막 갱신 <span id="updated">-</span></p>
+</div>
+
+<script>
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  async function load() {
+    try {
+      const d = await (await fetch('/api/results')).json();
+      const first = d.ranking[0];
+      const leader = d.voters && first.votes ? first.name : '-';
+
+      document.getElementById('kpis').innerHTML = `
+        <div class="kpi"><div class="label">참여 인원</div><div class="value">${d.voters}명</div></div>
+        <div class="kpi"><div class="label">현재 1위</div><div class="value">${esc(leader)}</div></div>
+        <div class="kpi"><div class="label">총 표 수</div><div class="value">${d.totalVotes}표</div></div>`;
+
+      const max = Math.max(1, ...d.ranking.map(r => r.votes));
+      let rank = 0, prev = null;
+      document.getElementById('ranking').innerHTML = d.ranking.map((r, i) => {
+        if (r.votes !== prev) { rank = i + 1; prev = r.votes; }   // 동점은 같은 순위
+        const top = r.votes > 0 && rank <= 3;
+        return `<div class="row${top ? ' top' : ''}">
+          <span class="rank">${rank}</span>
+          <span class="name"><b>${esc(r.name)}</b><small>${esc(r.category)}</small></span>
+          <div class="bar"><i style="width:${r.votes / max * 100}%"></i></div>
+          <span class="num">${r.votes}표 <small>${r.pct}%</small></span></div>`;
+      }).join('');
+
+      document.getElementById('comments').innerHTML = d.comments.length
+        ? d.comments.map(c => `<li>${esc(c.text)}
+            <span class="meta">${esc(c.nickname)} · ${esc(c.picks.join(', '))} · ${esc(c.at)}</span></li>`).join('')
+        : '<li style="color:var(--muted)">아직 한줄평이 없어요.</li>';
+
+      document.getElementById('updated').textContent = new Date().toLocaleTimeString('ko-KR');
+    } catch (err) {
+      document.getElementById('updated').textContent = '서버 연결 실패';
+    }
+  }
+  load();
+  setInterval(load, 5000);
+</script>
+</body>
+</html>

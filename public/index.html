@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>삼성역 맛집 투표</title>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --text:#1f2937; --muted:#6b7280; --accent:#4f46e5; --accent-soft:#eef2ff; --line:#e5e7eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:"Pretendard","Malgun Gothic",sans-serif; }
+  .wrap { max-width:640px; margin:40px auto; padding:0 16px; }
+  .card { background:var(--card); border-radius:16px; padding:32px; box-shadow:0 4px 20px rgba(0,0,0,.06); }
+  h1 { margin:0 0 6px; font-size:26px; }
+  .sub { color:var(--muted); margin:0 0 28px; }
+  .q { margin-bottom:26px; }
+  .q > label, .q > .title { display:block; font-weight:600; margin-bottom:10px; }
+  .hint { font-weight:400; color:var(--muted); font-size:13px; margin-left:6px; }
+  .shops { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:10px; }
+  .shop { border:1.5px solid var(--line); border-radius:12px; padding:14px; cursor:pointer; user-select:none; transition:.15s; }
+  .shop input { display:none; }
+  .shop b { display:block; font-size:15px; }
+  .shop small { color:var(--muted); }
+  .shop:has(input:checked) { border-color:var(--accent); background:var(--accent-soft); }
+  .shop:has(input:checked) b::after { content:" ✓"; color:var(--accent); }
+  input[type=text], textarea { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font:inherit; }
+  textarea { min-height:80px; resize:vertical; }
+  button { width:100%; padding:14px; border:0; border-radius:12px; background:var(--accent); color:#fff; font-size:16px; font-weight:700; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  .done { display:none; text-align:center; padding:30px 0; }
+  .done .big { font-size:48px; }
+  .done a { color:var(--accent); font-weight:700; }
+  .note { margin-top:16px; font-size:13px; color:var(--muted); text-align:center; }
+  .note a { color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <form id="form">
+      <h1>🍽️ 삼성역 맛집 투표</h1>
+      <p class="sub">가 봤거나 가고 싶은 곳을 모두 골라 주세요.</p>
+
+      <div class="q">
+        <label for="nickname">닉네임 <span class="hint">비워 두면 익명</span></label>
+        <input type="text" id="nickname" maxlength="20" placeholder="예: 점심탐험가">
+      </div>
+
+      <div class="q">
+        <span class="title">맛집 고르기 <span class="hint">여러 곳 선택 가능</span></span>
+        <div class="shops" id="shops">불러오는 중...</div>
+      </div>
+
+      <div class="q">
+        <label for="comment">한줄평</label>
+        <textarea id="comment" maxlength="200" placeholder="추천 메뉴나 꿀팁을 적어 주세요"></textarea>
+      </div>
+
+      <button type="submit">투표하기</button>
+    </form>
+
+    <div class="done" id="done">
+      <div class="big">🎉</div>
+      <h1>투표 완료!</h1>
+      <p class="sub">참여해 주셔서 고마워요.</p>
+      <a href="/result">결과 보러 가기 →</a>
+    </div>
+  </div>
+  <p class="note">※ 투표는 이 노트북의 서버를 거쳐 DB(survey.db)에 저장돼요. <a href="/result">결과 보기</a></p>
+</div>
+
+<script>
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // 1) 서버에서 후보 목록을 받아 카드로 그림
+  fetch('/api/restaurants').then(r => r.json()).then(list => {
+    document.getElementById('shops').innerHTML = list.map(s => `
+      <label class="shop"><input type="checkbox" name="pick" value="${esc(s.id)}">
+        <b>${esc(s.name)}</b><small>${esc(s.category)}</small></label>`).join('');
+  }).catch(() => {
+    document.getElementById('shops').textContent = '서버에 연결하지 못했어요.';
+  });
+
+  // 2) 제출하면 서버로 보내고, 서버가 DB에 저장
+  document.getElementById('form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const picks = [...this.querySelectorAll('input[name=pick]:checked')].map(c => c.value);
+    if (!picks.length) return alert('가게를 한 곳 이상 골라 주세요.');
+
+    const btn = this.querySelector('button');
+    btn.disabled = true; btn.textContent = '보내는 중...';
+    try {
+      const res = await fetch('/api/votes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          picks,
+          nickname: document.getElementById('nickname').value,
+          comment: document.getElementById('comment').value
+        })
+      });
+      if (!res.ok) throw new Error((await res.json()).error || '저장 실패');
+      this.style.display = 'none';
+      document.getElementById('done').style.display = 'block';
+    } catch (err) {
+      alert('투표하지 못했어요: ' + err.message);
+      btn.disabled = false; btn.textContent = '투표하기';
+    }
+  });
+</script>
+</body>
+</html>
